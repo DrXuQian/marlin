@@ -23,6 +23,22 @@ nvcc -o fp8_simple fp8_simple_kernel.cu -std=c++11 -arch=sm_89
 ./fp8_simple
 ```
 
+### 3. Validate (Automated Testing)
+
+Run the comprehensive validation script to verify everything works:
+
+```bash
+chmod +x validate_fp8.sh
+./validate_fp8.sh
+```
+
+This script will:
+- ✓ Validate weight file size and integrity
+- ✓ Test FP8 E4M3 decoder with known values
+- ✓ Compile the kernel
+- ✓ Run matrix multiplication with real weights
+- ✓ Verify all 14336 outputs are non-zero
+
 **Expected output:**
 ```
 === Simple FP8 Matrix Multiplication ===
@@ -60,6 +76,7 @@ Statistics:
 - **`extract_fp8_weight.py`** - Downloads FP8 weights from HuggingFace
 - **`fp8_simple_kernel.cu`** - Simple CUDA kernel with manual FP8 E4M3 decoding
 - **`test_fp8_decode.cu`** - Tests FP8 E4M3 decoder on host
+- **`validate_fp8.sh`** - Automated validation script
 - **`up_proj_fp8_weight.bin`** - Real FP8 weights (not in git, download via script)
 
 ## FP8 E4M3 Format

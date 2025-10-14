@@ -47,6 +47,22 @@ nvcc -o test_bisect test_bisect.cu -std=c++11 -arch=sm_80 --expt-relaxed-constex
 ./test_bisect b -1
 ```
 
+### 5. Validate (Automated Testing)
+
+Run the comprehensive validation script to verify everything works:
+
+```bash
+chmod +x validate_int4.sh
+./validate_int4.sh
+```
+
+This script will:
+- ✓ Validate weight and scale file sizes
+- ✓ Test with random weights (baseline)
+- ✓ Confirm groupsize=128 limitation
+- ✓ Run with real GPTQ weights and groupsize=-1
+- ✓ Verify all outputs are non-zero and correct
+
 **Expected output:**
 ```
 Testing with M=1, K=2048, N=11008, groupsize=-1
@@ -75,9 +91,9 @@ First 20 output values:
 ✓ SUCCESS: Found non-zero outputs! Max abs value: 0.475342
 ```
 
-## Test Options
+## Manual Test Options
 
-The test program supports different weight/scale combinations:
+The test program supports different weight/scale combinations for debugging:
 
 ```bash
 ./test_bisect <weight_type> <groupsize>
@@ -88,17 +104,19 @@ The test program supports different weight/scale combinations:
 - `b` - Binary files (real GPTQ weights)
 
 **Groupsize:**
-- `-1` - Per-column quantization (one scale per output column)
-- `128` - Grouped quantization (one scale per 128 input features)
+- `-1` - Per-column quantization (one scale per output column) **✓ WORKS**
+- `128` - Grouped quantization (one scale per 128 input features) **✗ Produces all zeros**
 
 **Examples:**
 
 ```bash
 ./test_bisect r -1     # Random weights, groupsize=-1 → ✓ Works
-./test_bisect r 128    # Random weights, groupsize=128 → ✗ All zeros (kernel bug)
+./test_bisect r 128    # Random weights, groupsize=128 → ✗ All zeros (kernel limitation)
 ./test_bisect b -1     # GPTQ weights, groupsize=-1 → ✓ Works with real data!
-./test_bisect b 128    # GPTQ weights, groupsize=128 → ✗ All zeros (kernel bug)
+./test_bisect b 128    # GPTQ weights, groupsize=128 → ✗ All zeros (kernel limitation)
 ```
+
+**Recommended**: Use `./validate_int4.sh` instead of manual testing.
 
 ## Important Finding
 
