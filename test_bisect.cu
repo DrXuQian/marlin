@@ -18,9 +18,12 @@
 #include <cuda_fp16.h>
 #include <cuda_runtime.h>
 #include <iostream>
+#include <fstream>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <vector>
+#include <cmath>
 
 __host__ __device__ inline int ceildiv(int a, int b) {
   return (a + b - 1) / b;
@@ -710,12 +713,25 @@ int marlin_cuda(
   return ret;
 }
 
+bool load_gptq_file(const char* filepath, void** data, size_t* size) {
+  std::ifstream file(filepath, std::ios::binary | std::ios::ate);
+  if (!file.is_open()) return false;
+  *size = file.tellg();
+  file.seekg(0);
+  *data = malloc(*size);
+  file.read((char*)*data, *size);
+  file.close();
+  return true;
+}
+
 int main(int argc, char* argv[]) {
-  // Example usage - you can modify these parameters for testing
-  const int M = 128;  // Batch size
-  const int N = 256;  // Output dimension
-  const int K = 512;  // Input dimension
-  const int groupsize = -1;  // -1 for per-column quantization
+  // Use GPTQ dimensions
+  const int M = 1;
+  const int N = 11008;
+  const int K = 2048;
+  const int groupsize = (argc > 2) ? atoi(argv[2]) : -1;  // Allow groupsize as 2nd arg
+
+  std::cout << "Testing with M=" << M << ", K=" << K << ", N=" << N << ", groupsize=" << groupsize << std::endl;
 
   // Allocate device memory
   void *d_A, *d_B, *d_C, *d_s, *d_workspace;
@@ -731,13 +747,109 @@ int main(int argc, char* argv[]) {
   cudaMalloc(&d_s, s_size);
   cudaMalloc(&d_workspace, workspace_size);
 
-  // Initialize with random data (you can modify this)
-  cudaMemset(d_A, 0, A_size);
-  cudaMemset(d_B, 0, B_size);
-  cudaMemset(d_s, 1, s_size);
+  // Initialize data
+  std::vector<half> h_A(M * K);
+  std::vector<int> h_B(B_size / sizeof(int));
+  std::vector<half> h_s(s_size / sizeof(half));
+
+  // TEST CONFIGURATION
+  bool use_gptq_weights = (argc > 1 && argv[1][0] == 'w');
+  bool use_gptq_scales = (argc > 1 && argv[1][0] == 's');
+  bool use_both_gptq = (argc > 1 && argv[1][0] == 'b');
+
+  std::cout << "\n=== Binary Search Test ===" << std::endl;
+  if (use_both_gptq || use_gptq_weights) {
+    std::cout << "Weights: GPTQ" << std::endl;
+  } else {
+    std::cout << "Weights: Random" << std::endl;
+  }
+  if (use_both_gptq || use_gptq_scales) {
+    std::cout << "Scales: GPTQ" << std::endl;
+  } else {
+    std::cout << "Scales: Random" << std::endl;
+  }
+  std::cout << "==========================\n" << std::endl;
+
+  // Input A - always use 0.1
+  for (int i = 0; i < M * K; i++) {
+    h_A[i] = __float2half(0.1f);
+  }
+
+  // Weights B
+  if (use_both_gptq || use_gptq_weights) {
+    void* gptq_data = nullptr;
+    size_t gptq_size;
+    if (load_gptq_file("up_proj_qweight.bin", &gptq_data, &gptq_size)) {
+      // Unpack GPTQ and repack
+      int* gptq_packed = (int*)gptq_data;
+      std::vector<int> unpacked(K * N);
+      for (int row = 0; row < 256; row++) {
+        for (int col = 0; col < N; col++) {
+          int packed_val = gptq_packed[row * N + col];
+          for (int j = 0; j < 8; j++) {
+            unpacked[(row * 8 + j) * N + col] = (packed_val >> (j * 4)) & 0xF;
+          }
+        }
+      }
+      for (size_t i = 0; i < h_B.size(); i++) {
+        int val = 0;
+        for (int j = 0; j < 8; j++) {
+          val |= (unpacked[i * 8 + j] & 0xF) << (j * 4);
+        }
+        h_B[i] = val;
+      }
+      free(gptq_data);
+      std::cout << "✓ Loaded GPTQ weights" << std::endl;
+    } else {
+      std::cerr << "Failed to load GPTQ weights, using random" << std::endl;
+      use_gptq_weights = false;
+    }
+  }
+
+  if (!use_gptq_weights && !use_both_gptq) {
+    srand(42);
+    for (size_t i = 0; i < h_B.size(); i++) {
+      int val = 0;
+      for (int j = 0; j < 8; j++) {
+        val |= ((rand() % 16) & 0xF) << (j * 4);
+      }
+      h_B[i] = val;
+    }
+    std::cout << "✓ Generated random weights" << std::endl;
+  }
+
+  // Scales
+  if (use_both_gptq || use_gptq_scales) {
+    void* gptq_scales = nullptr;
+    size_t scales_size;
+    if (load_gptq_file("up_proj_scales.bin", &gptq_scales, &scales_size)) {
+      memcpy(h_s.data(), gptq_scales, s_size);
+      free(gptq_scales);
+      std::cout << "✓ Loaded GPTQ scales" << std::endl;
+    } else {
+      std::cerr << "Failed to load GPTQ scales, using random" << std::endl;
+      use_gptq_scales = false;
+    }
+  }
+
+  if (!use_gptq_scales && !use_both_gptq) {
+    srand(43);
+    for (size_t i = 0; i < h_s.size(); i++) {
+      h_s[i] = __float2half(0.01f + (float)rand() / RAND_MAX * 0.02f);
+    }
+    std::cout << "✓ Generated random scales" << std::endl;
+  }
+
+  cudaMemcpy(d_A, h_A.data(), A_size, cudaMemcpyHostToDevice);
+  cudaMemcpy(d_B, h_B.data(), B_size, cudaMemcpyHostToDevice);
+  cudaMemcpy(d_s, h_s.data(), s_size, cudaMemcpyHostToDevice);
   cudaMemset(d_workspace, 0, workspace_size);
 
+  std::cout << "\nFirst 3 weights: " << h_B[0] << ", " << h_B[1] << ", " << h_B[2] << std::endl;
+  std::cout << "First 3 scales: " << __half2float(h_s[0]) << ", " << __half2float(h_s[1]) << ", " << __half2float(h_s[2]) << std::endl;
+
   // Run the kernel
+  std::cout << "\nRunning Marlin kernel..." << std::endl;
   int result = marlin_cuda(
     d_A, d_B, d_C, d_s,
     M, N, K,
@@ -746,8 +858,33 @@ int main(int argc, char* argv[]) {
   );
 
   if (result == 0) {
-    printf("Kernel executed successfully!\n");
+    printf("\n✓ Kernel executed successfully!\n");
     printf("Matrix multiplication: (%d x %d) * (%d x %d) = (%d x %d)\n", M, K, K, N, M, N);
+
+    // Copy result back and check
+    std::vector<half> h_C(M * N);
+    cudaMemcpy(h_C.data(), d_C, C_size, cudaMemcpyDeviceToHost);
+
+    printf("\nFirst 20 output values:\n");
+    for (int i = 0; i < 20; i++) {
+      printf("  C[%2d] = %.6f\n", i, __half2float(h_C[i]));
+    }
+
+    // Check if all zeros
+    bool all_zero = true;
+    float max_abs = 0;
+    for (int i = 0; i < M * N; i++) {
+      float val = std::abs(__half2float(h_C[i]));
+      if (val > 1e-6) all_zero = false;
+      if (val > max_abs) max_abs = val;
+    }
+
+    if (all_zero) {
+      printf("\n⚠️  WARNING: All outputs are zero!\n");
+    } else {
+      printf("\n✓ SUCCESS: Found non-zero outputs! Max abs value: %.6f\n", max_abs);
+    }
+
   } else if (result == ERR_PROB_SHAPE) {
     printf("Error: Problem shape incompatible with kernel constraints.\n");
   } else if (result == ERR_KERN_SHAPE) {

@@ -8,3 +8,8 @@ _backup
 gptq/__pycache__
 gptq/*.marlin.g128
 __pycache__
+
+# Binary weight files (too large for git)
+*.bin
+marlin_test
+test_bisect
